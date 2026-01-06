@@ -4,7 +4,8 @@ All endpoints require password authentication via header.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Header, UploadFile, File, Form, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.sql import func
 from typing import Optional, List
 import logging
 import re
@@ -12,7 +13,7 @@ import asyncio
 
 from app.database import get_db
 from app.models import GalleryImage
-from app.schemas import GalleryImageResponse, GalleryImageUpdate, BulkDeleteRequest
+from app.schemas import GalleryImageResponse, GalleryImageUpdate, BulkDeleteRequest, ImageReorderRequest
 from app.utils.auth import verify_admin_password
 from app.services.cloudinary_service import upload_image, delete_image
 
@@ -127,9 +128,9 @@ async def get_cms_gallery_images(
         HTTPException: 500 if database query fails
     """
     try:
-        # Query all gallery images, ordered by created_at descending (newest first)
+        # Query all gallery images, ordered by display_order ascending (custom order)
         result = await db.execute(
-            select(GalleryImage).order_by(GalleryImage.created_at.desc())
+            select(GalleryImage).order_by(GalleryImage.display_order.asc())
         )
         images = result.scalars().all()
         
@@ -299,23 +300,112 @@ async def _process_single_image_upload(
         cloudinary_url = cloudinary_result["url"]
         
         logger.info(f"Successfully uploaded to Cloudinary: {cloudinary_url}")
-        
-        # Save to database
+
+        # Get the current maximum display_order
+        max_order_result = await db.execute(
+            select(func.max(GalleryImage.display_order))
+        )
+        max_order = max_order_result.scalar() or 0
+
+        # Save to database with next display_order
+        # New images appear at the end (highest order number)
         new_image = GalleryImage(
             cloudinary_url=cloudinary_url,
-            caption=caption.strip() if caption and caption.strip() else None
+            caption=caption.strip() if caption and caption.strip() else None,
+            display_order=max_order + 1
         )
         db.add(new_image)
         await db.flush()  # Flush to get ID but don't commit yet
         await db.refresh(new_image)
-        
-        logger.info(f"Successfully saved image to database: ID {new_image.id}")
+
+        logger.info(f"Successfully saved image to database: ID {new_image.id}, display_order={new_image.display_order}")
         
         return new_image
         
     except Exception as e:
         logger.error(f"Error processing image upload for {file.filename}: {str(e)}")
         raise
+
+
+@router.put("/gallery-images/reorder")
+async def reorder_gallery_images(
+    request: ImageReorderRequest,
+    db: AsyncSession = Depends(get_db),
+    authenticated: bool = Depends(verify_cms_password)
+):
+    """
+    Reorder gallery images by updating display_order.
+    Requires password authentication.
+
+    The frontend sends an array of image IDs in the desired display order.
+    This endpoint updates each image's display_order to match the array index.
+
+    Args:
+        request: ImageReorderRequest containing ordered list of image IDs
+        db: Database session (injected by FastAPI dependency)
+        authenticated: Authentication status (injected by dependency)
+
+    Returns:
+        dict: Success message with count of reordered images
+
+    Raises:
+        HTTPException: 400 if invalid IDs, 404 if images not found, 500 if update fails
+    """
+    try:
+        image_ids = request.image_ids
+
+        if not image_ids or len(image_ids) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "No image IDs provided", "detail": "At least one image ID is required"}
+            )
+
+        # Verify all images exist
+        result = await db.execute(
+            select(GalleryImage).where(GalleryImage.id.in_(image_ids))
+        )
+        existing_images = result.scalars().all()
+        existing_ids = {img.id for img in existing_images}
+
+        # Check for missing IDs
+        missing_ids = set(image_ids) - existing_ids
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Images not found",
+                    "detail": f"Image IDs not found: {list(missing_ids)}"
+                }
+            )
+
+        # Update display_order for each image
+        # Use enumerate to get position in array (0, 1, 2, ...)
+        # Lower display_order = appears first in gallery
+        for position, image_id in enumerate(image_ids):
+            await db.execute(
+                update(GalleryImage)
+                .where(GalleryImage.id == image_id)
+                .values(display_order=position)
+            )
+
+        await db.commit()
+
+        logger.info(f"Successfully reordered {len(image_ids)} images")
+
+        return {
+            "message": f"Successfully reordered {len(image_ids)} images",
+            "count": len(image_ids)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reordering gallery images: {str(e)}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to reorder gallery images", "detail": str(e)}
+        )
 
 
 @router.put("/gallery-images/{image_id}", response_model=GalleryImageResponse)
@@ -595,4 +685,3 @@ async def delete_cms_gallery_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to delete gallery image", "detail": str(e)}
         )
-

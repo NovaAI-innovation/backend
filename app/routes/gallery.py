@@ -36,9 +36,9 @@ async def get_gallery_images(db: AsyncSession = Depends(get_db)):
         HTTPException: 500 if database query fails
     """
     try:
-        # Query all gallery images, ordered by created_at descending (newest first)
+        # Query all gallery images, ordered by display_order ascending (custom order)
         result = await db.execute(
-            select(GalleryImage).order_by(GalleryImage.created_at.desc())
+            select(GalleryImage).order_by(GalleryImage.display_order.asc())
         )
         images = result.scalars().all()
 

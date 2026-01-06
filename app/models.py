@@ -13,10 +13,11 @@ class GalleryImage(Base):
     Stores image metadata including Cloudinary URL and caption.
     """
     __tablename__ = "gallery_images"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     cloudinary_url = Column(String, nullable=False)
     caption = Column(String, nullable=True)
+    display_order = Column(Integer, nullable=False, default=0, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

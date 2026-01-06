@@ -2,7 +2,7 @@
 Pydantic schemas for request and response data validation.
 Defines data structures for API endpoints with automatic validation and serialization.
 """
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from datetime import datetime
 from typing import Optional
 
@@ -15,6 +15,7 @@ class GalleryImageResponse(BaseModel):
     id: int
     cloudinary_url: str
     caption: Optional[str] = None
+    display_order: int
     created_at: datetime
     updated_at: datetime
 
@@ -49,3 +50,19 @@ class BulkDeleteRequest(BaseModel):
     Used by DELETE /api/cms/gallery-images/bulk endpoint.
     """
     image_ids: list[int]
+
+
+class ImageReorderRequest(BaseModel):
+    """
+    Request schema for reordering gallery images.
+    Used by PUT /api/cms/gallery-images/reorder endpoint.
+    Contains array of image IDs in the desired display order.
+    """
+    image_ids: list[int]
+
+    @field_validator('image_ids')
+    @classmethod
+    def validate_unique_ids(cls, v):
+        if len(v) != len(set(v)):
+            raise ValueError('Duplicate image IDs are not allowed')
+        return v
