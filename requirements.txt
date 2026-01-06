@@ -1,0 +1,5 @@
+# Python dependencies for mm-bmad-v2-backend
+# Managed by uv - use `uv add <package>` to add dependencies
+# This file will be populated as dependencies are added in Epic 2
+
+
