@@ -29,6 +29,8 @@ class Settings(BaseSettings):
         "http://localhost",
         "http://127.0.0.1",
         "https://*.github.io",
+        "https://novaai-innovation.github.io/New-site-repo-main123",
+        "https://novaai-innovation.github.io/New-site-repo-main123/",
     ]
     
     # Database Configuration (will be used in Story 2.2)
