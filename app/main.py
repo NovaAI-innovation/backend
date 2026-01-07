@@ -31,76 +31,19 @@ app = FastAPI(
 )
 
 # CORS Middleware Configuration
-# Allow requests from GitHub Pages frontend and local development
-# Note: For file:// protocol, browsers send "null" as origin
-# We allow null origin for development (file:// protocol)
-# In production, credentials should be enabled and null origin should be blocked
-cors_origins = list(settings.CORS_ORIGINS) if settings.CORS_ORIGINS else []
-# Allow null origin for file:// protocol in development
-cors_origins.append("null")
-
+# Allow ALL origins for now to fix CORS issues
+# In production, you should restrict this to specific origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=False,  # Set to False when allowing null origin (CORS spec requirement)
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when using wildcard origin
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "X-CMS-Password",
-        "Accept",
-        "Origin",
-        "X-Requested-With",
-        "Access-Control-Request-Method",
-        "Access-Control-Request-Headers",
-    ],
+    allow_headers=["*"],  # Allow all headers including X-CMS-Password
     expose_headers=["*"],
     max_age=3600,  # Cache preflight requests for 1 hour
 )
 
-# Custom CORS middleware to ensure headers are set for all allowed origins
-@app.middleware("http")
-async def cors_ensure_headers_middleware(request: Request, call_next):
-    """
-    Custom middleware to ensure CORS headers are set for all allowed origins.
-    This acts as a fallback if CORSMiddleware doesn't set headers properly.
-    """
-    origin = request.headers.get("origin")
-    
-    # Process the request
-    response = await call_next(request)
-    
-    # Check if origin is in allowed list or is null
-    if origin:
-        is_allowed_origin = (
-            origin in cors_origins or 
-            origin == "null" or
-            any(origin.startswith(allowed.replace("*", "")) for allowed in cors_origins if "*" in allowed)
-        )
-        
-        if is_allowed_origin:
-            # Check if Access-Control-Allow-Origin is already set (case-insensitive)
-            existing_cors_header = None
-            for key in response.headers.keys():
-                if key.lower() == "access-control-allow-origin":
-                    existing_cors_header = key
-                    break
-            
-            if not existing_cors_header:
-                # Set CORS headers - always set them for allowed origins
-                response.headers["Access-Control-Allow-Origin"] = origin
-                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-                response.headers["Access-Control-Allow-Headers"] = "*"
-                response.headers["Access-Control-Expose-Headers"] = "*"
-                logger.info(f"Added CORS headers for origin '{origin}' to {request.method} {request.url.path}")
-            else:
-                # Ensure the header value matches the origin (update if needed)
-                current_value = response.headers.get(existing_cors_header)
-                if current_value != origin:
-                    response.headers[existing_cors_header] = origin
-                    logger.info(f"Updated CORS header from '{current_value}' to '{origin}' for {request.method} {request.url.path}")
-    
-    return response
+# Note: Custom CORS middleware removed as CORSMiddleware with allow_origins=["*"] handles all cases
 
 
 # Request logging middleware for debugging
@@ -147,85 +90,7 @@ async def log_requests(request: Request, call_next):
         )
         raise
 
-# OPTIONS handlers must be registered BEFORE routers to ensure they're matched first
-@app.options("/api/gallery-images")
-async def options_gallery_images(request: Request):
-    """
-    Explicit OPTIONS handler for gallery-images endpoint.
-    Handles null origin (file:// protocol) for development.
-    """
-    origin = request.headers.get("origin", "No origin")
-    logger.info(
-        f"Explicit OPTIONS handler called for /api/gallery-images\n"
-        f"  Origin: {origin}\n"
-        f"  All headers: {dict(request.headers)}"
-    )
-    
-    # Handle null origin (file:// protocol)
-    # When origin is null, we can't use credentials (CORS spec)
-    allow_origin = origin if origin != "No origin" else "*"
-    if origin == "null":
-        allow_origin = "null"
-    
-    # Return empty response with CORS headers
-    return JSONResponse(
-        content={},
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": allow_origin,
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
-
-
-@app.options("/api/cms/{path:path}")
-async def options_cms_routes(request: Request, path: str):
-    """
-    Explicit OPTIONS handler for all CMS routes.
-    Handles CORS preflight requests for all allowed origins.
-    This catches all OPTIONS requests to /api/cms/* routes.
-    """
-    origin = request.headers.get("origin", "No origin")
-    access_control_request_method = request.headers.get("access-control-request-method", "POST")
-    access_control_request_headers = request.headers.get("access-control-request-headers", "*")
-    
-    logger.info(
-        f"Explicit OPTIONS handler called for /api/cms/{path}\n"
-        f"  Origin: {origin}\n"
-        f"  Access-Control-Request-Method: {access_control_request_method}\n"
-        f"  Access-Control-Request-Headers: {access_control_request_headers}\n"
-        f"  All headers: {dict(request.headers)}"
-    )
-    
-    # Determine allowed origin
-    if origin == "No origin":
-        # No origin header - allow with wildcard (for same-origin requests)
-        allow_origin = "*"
-    elif origin == "null":
-        # Null origin (file:// protocol)
-        allow_origin = "null"
-    elif origin in cors_origins:
-        # Origin is in allowed list
-        allow_origin = origin
-    else:
-        # Origin not in allowed list - still allow but log warning
-        logger.warning(f"OPTIONS request from unlisted origin: {origin}")
-        allow_origin = origin  # Allow it anyway for now
-    
-    # Return empty response with CORS headers
-    return JSONResponse(
-        content={},
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": allow_origin,
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-            "Access-Control-Allow-Headers": access_control_request_headers or "*",
-            "Access-Control-Expose-Headers": "*",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
+# Note: Explicit OPTIONS handlers removed - CORSMiddleware handles all preflight requests automatically
 
 
 # Include routers (after OPTIONS handlers)
@@ -235,31 +100,21 @@ app.include_router(cms.router, prefix="/api", tags=["CMS"])
 
 def add_cors_headers(response: JSONResponse, request: Request) -> JSONResponse:
     """
-    Add CORS headers to a response based on the request origin.
-    
+    Add CORS headers to error responses.
+    Since we use allow_origins=["*"], we set Access-Control-Allow-Origin to "*" for all responses.
+
     Args:
         response: The JSONResponse to add headers to
-        request: The incoming request to check origin from
-    
+        request: The incoming request
+
     Returns:
         JSONResponse with CORS headers added
     """
-    origin = request.headers.get("origin")
-    
-    if origin:
-        # Check if origin is allowed
-        is_allowed = (
-            origin in cors_origins or 
-            origin == "null" or
-            any(origin.startswith(allowed.replace("*", "")) for allowed in cors_origins if "*" in allowed)
-        )
-        
-        if is_allowed:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-            response.headers["Access-Control-Expose-Headers"] = "*"
-    
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "*"
+
     return response
 
 
