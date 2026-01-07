@@ -198,7 +198,7 @@ async def add_cms_gallery_images(
                     detail={"error": "Invalid file type", "detail": f"File '{filename}' is not a valid image file"}
                 )
         
-        # Process uploads concurrently for better performance
+        # Step 1: Upload all files to Cloudinary concurrently (no database operations)
         upload_tasks = []
         for i, file in enumerate(files):
             # Get caption for this file (if provided)
@@ -208,29 +208,69 @@ async def add_cms_gallery_images(
             elif caption_list and len(caption_list) == 1:
                 # If only one caption provided, apply to all files
                 caption = caption_list[0]
-            
-            # Create upload task
-            task = _process_single_image_upload(file, caption, db)
+
+            # Create upload task (only Cloudinary upload, no DB operations)
+            task = _upload_to_cloudinary(file, caption)
             upload_tasks.append(task)
-        
-        # Execute all uploads concurrently
-        results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-        
-        # Process results and handle errors
-        created_images = []
+
+        # Execute all Cloudinary uploads concurrently
+        upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+        # Process upload results
+        successful_uploads = []
         errors = []
-        
-        for i, result in enumerate(results):
+
+        for i, result in enumerate(upload_results):
             if isinstance(result, Exception):
                 error_msg = str(result)
                 filename = getattr(files[i], 'filename', f'file_{i}')
-                logger.error(f"Error uploading file {filename}: {error_msg}")
+                logger.error(f"Error uploading file {filename} to Cloudinary: {error_msg}")
                 errors.append({
                     "filename": filename,
                     "error": error_msg
                 })
             else:
-                created_images.append(result)
+                successful_uploads.append(result)
+
+        # If all uploads failed, return error
+        if len(successful_uploads) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": "All uploads failed",
+                    "errors": errors
+                }
+            )
+
+        # Step 2: Save all successful uploads to database SEQUENTIALLY to avoid session conflicts
+        created_images = []
+        for upload_data in successful_uploads:
+            try:
+                # Get the current maximum display_order
+                max_order_result = await db.execute(
+                    select(func.max(GalleryImage.display_order))
+                )
+                max_order = max_order_result.scalar() or 0
+
+                # Create database record
+                new_image = GalleryImage(
+                    cloudinary_url=upload_data["url"],
+                    caption=upload_data["caption"],
+                    display_order=max_order + 1
+                )
+                db.add(new_image)
+                await db.flush()  # Flush to get ID but don't commit yet
+                await db.refresh(new_image)
+
+                created_images.append(new_image)
+                logger.info(f"Successfully saved image to database: ID {new_image.id}, display_order={new_image.display_order}")
+
+            except Exception as e:
+                logger.error(f"Error saving image to database: {str(e)}")
+                errors.append({
+                    "filename": upload_data.get("filename", "unknown"),
+                    "error": f"Database save failed: {str(e)}"
+                })
         
         # If all uploads failed, rollback and return error
         if len(created_images) == 0:
@@ -269,41 +309,33 @@ async def add_cms_gallery_images(
         )
 
 
-async def _process_single_image_upload(
-    file: UploadFile,
-    caption: Optional[str],
-    db: AsyncSession
-) -> GalleryImage:
+async def _upload_to_cloudinary(file: UploadFile, caption: Optional[str]) -> dict:
     """
-    Process a single image upload.
-    Helper function for bulk uploads.
-    
+    Upload a single image to Cloudinary (no database operations).
+    This function can be run concurrently with other uploads.
+
     Args:
         file: Image file to upload
         caption: Optional caption for the image
-        db: Database session
-    
+
     Returns:
-        GalleryImage: Created image model
-    
+        dict: Upload data containing url, caption, and filename
+
     Raises:
-        Exception: If upload or save fails
+        Exception: If upload fails
     """
     try:
         # Read file content
-        # For files from form data, we need to read the content
         file_content = await file.read()
-        
         filename = getattr(file, 'filename', 'unknown')
-        
+
         # Convert to WebP format to reduce file size before upload
-        # Falls back to original if conversion fails
         converted_content, conversion_success = await convert_to_webp(
             file_content,
-            quality=85,  # Good balance between quality and file size
-            skip_if_webp=True  # Skip if already WebP
+            quality=85,
+            skip_if_webp=True
         )
-        
+
         if conversion_success:
             original_size = len(file_content)
             converted_size = len(converted_content)
@@ -315,41 +347,24 @@ async def _process_single_image_upload(
                 file_content = converted_content
             else:
                 logger.debug(f"WebP conversion did not reduce size for {filename}, using original")
-                file_content = file_content  # Use original if WebP is larger
         else:
             logger.warning(f"WebP conversion failed for {filename}, uploading original format")
-            # Use original file_content if conversion failed
-        
-        # Upload to Cloudinary (pass file content as bytes)
+
+        # Upload to Cloudinary
         logger.info(f"Uploading image to Cloudinary: {filename}")
         cloudinary_result = await upload_image(file_content, folder="gallery")
         cloudinary_url = cloudinary_result["url"]
-        
+
         logger.info(f"Successfully uploaded to Cloudinary: {cloudinary_url}")
 
-        # Get the current maximum display_order
-        max_order_result = await db.execute(
-            select(func.max(GalleryImage.display_order))
-        )
-        max_order = max_order_result.scalar() or 0
+        return {
+            "url": cloudinary_url,
+            "caption": caption.strip() if caption and caption.strip() else None,
+            "filename": filename
+        }
 
-        # Save to database with next display_order
-        # New images appear at the end (highest order number)
-        new_image = GalleryImage(
-            cloudinary_url=cloudinary_url,
-            caption=caption.strip() if caption and caption.strip() else None,
-            display_order=max_order + 1
-        )
-        db.add(new_image)
-        await db.flush()  # Flush to get ID but don't commit yet
-        await db.refresh(new_image)
-
-        logger.info(f"Successfully saved image to database: ID {new_image.id}, display_order={new_image.display_order}")
-        
-        return new_image
-        
     except Exception as e:
-        logger.error(f"Error processing image upload for {file.filename}: {str(e)}")
+        logger.error(f"Error uploading {file.filename} to Cloudinary: {str(e)}")
         raise
 
 
