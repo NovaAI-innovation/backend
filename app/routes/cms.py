@@ -15,6 +15,7 @@ from app.database import get_db
 from app.models import GalleryImage
 from app.schemas import GalleryImageResponse, GalleryImageUpdate, BulkDeleteRequest, ImageReorderRequest
 from app.utils.auth import verify_admin_password
+from app.utils.image_converter import convert_to_webp
 from app.services.cloudinary_service import upload_image, delete_image
 
 logger = logging.getLogger(__name__)
@@ -293,8 +294,33 @@ async def _process_single_image_upload(
         # For files from form data, we need to read the content
         file_content = await file.read()
         
-        # Upload to Cloudinary (pass file content as bytes)
         filename = getattr(file, 'filename', 'unknown')
+        
+        # Convert to WebP format to reduce file size before upload
+        # Falls back to original if conversion fails
+        converted_content, conversion_success = await convert_to_webp(
+            file_content,
+            quality=85,  # Good balance between quality and file size
+            skip_if_webp=True  # Skip if already WebP
+        )
+        
+        if conversion_success:
+            original_size = len(file_content)
+            converted_size = len(converted_content)
+            if converted_size < original_size:
+                logger.info(
+                    f"Converted {filename} to WebP: "
+                    f"{original_size:,} bytes → {converted_size:,} bytes"
+                )
+                file_content = converted_content
+            else:
+                logger.debug(f"WebP conversion did not reduce size for {filename}, using original")
+                file_content = file_content  # Use original if WebP is larger
+        else:
+            logger.warning(f"WebP conversion failed for {filename}, uploading original format")
+            # Use original file_content if conversion failed
+        
+        # Upload to Cloudinary (pass file content as bytes)
         logger.info(f"Uploading image to Cloudinary: {filename}")
         cloudinary_result = await upload_image(file_content, folder="gallery")
         cloudinary_url = cloudinary_result["url"]
