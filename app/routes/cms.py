@@ -183,11 +183,11 @@ async def add_cms_gallery_images(
                 detail={"error": "No files provided", "detail": "At least one image file is required"}
             )
         
-        # Get captions if provided
+        # Get captions if provided (one per file)
         caption_list = []
         captions = form.getlist("captions")
         if captions:
-            caption_list = [c if isinstance(c, str) else str(c) for c in captions]
+            caption_list = [c.strip() if isinstance(c, str) and c.strip() else None for c in captions]
         
         # Validate all files first
         for i, file in enumerate(files):
@@ -201,13 +201,10 @@ async def add_cms_gallery_images(
         # Process uploads concurrently for better performance
         upload_tasks = []
         for i, file in enumerate(files):
-            # Get caption for this file (if provided)
+            # Get caption for this file (one caption per file, by index)
             caption = None
             if caption_list and i < len(caption_list):
-                caption = caption_list[i]
-            elif caption_list and len(caption_list) == 1:
-                # If only one caption provided, apply to all files
-                caption = caption_list[0]
+                caption = caption_list[i] if caption_list[i] else None
             
             # Create upload task
             task = _process_single_image_upload(file, caption, db)
