@@ -44,7 +44,16 @@ app.add_middleware(
     allow_origins=cors_origins,
     allow_credentials=False,  # Set to False when allowing null origin (CORS spec requirement)
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-CMS-Password",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
     expose_headers=["*"],
     max_age=3600,  # Cache preflight requests for 1 hour
 )
@@ -71,26 +80,25 @@ async def cors_ensure_headers_middleware(request: Request, call_next):
         
         if is_allowed_origin:
             # Check if Access-Control-Allow-Origin is already set (case-insensitive)
-            has_cors_header = any(
-                key.lower() == "access-control-allow-origin" 
-                for key in response.headers.keys()
-            )
+            existing_cors_header = None
+            for key in response.headers.keys():
+                if key.lower() == "access-control-allow-origin":
+                    existing_cors_header = key
+                    break
             
-            if not has_cors_header:
-                # Set CORS headers
+            if not existing_cors_header:
+                # Set CORS headers - always set them for allowed origins
                 response.headers["Access-Control-Allow-Origin"] = origin
                 response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
                 response.headers["Access-Control-Allow-Headers"] = "*"
                 response.headers["Access-Control-Expose-Headers"] = "*"
                 logger.info(f"Added CORS headers for origin '{origin}' to {request.method} {request.url.path}")
             else:
-                # Ensure the header value matches the origin
-                for key, value in list(response.headers.items()):
-                    if key.lower() == "access-control-allow-origin":
-                        if value != origin and origin != "null":
-                            response.headers[key] = origin
-                            logger.info(f"Updated CORS header to '{origin}' for {request.method} {request.url.path}")
-                        break
+                # Ensure the header value matches the origin (update if needed)
+                current_value = response.headers.get(existing_cors_header)
+                if current_value != origin:
+                    response.headers[existing_cors_header] = origin
+                    logger.info(f"Updated CORS header from '{current_value}' to '{origin}' for {request.method} {request.url.path}")
     
     return response
 
