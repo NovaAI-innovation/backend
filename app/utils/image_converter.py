@@ -164,3 +164,4 @@ def get_image_info(image_bytes: bytes) -> Optional[dict]:
         logger.debug(f"Error getting image info: {str(e)}")
         return None
 
+
