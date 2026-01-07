@@ -4,7 +4,7 @@ All endpoints require password authentication via header.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Header, UploadFile, File, Form, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.sql import func
 from typing import Optional, List
 import logging
@@ -596,9 +596,11 @@ async def delete_cms_gallery_images_bulk(
             
             # Delete from database (always attempt, even if Cloudinary deletion failed)
             try:
-                db.delete(image)
+                await db.execute(
+                    delete(GalleryImage).where(GalleryImage.id == image.id)
+                )
                 deleted_ids.append(image.id)
-                logger.info(f"Successfully marked image for deletion: ID {image.id}")
+                logger.info(f"Successfully deleted image from database: ID {image.id}")
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"Error deleting image {image.id} from database: {error_msg}")
@@ -736,7 +738,9 @@ async def delete_cms_gallery_image(
             logger.warning(f"Could not extract public_id from URL: {image.cloudinary_url}, skipping Cloudinary deletion for image ID {image_id}")
         
         # Delete from database
-        db.delete(image)
+        await db.execute(
+            delete(GalleryImage).where(GalleryImage.id == image_id)
+        )
         await db.commit()
         
         logger.info(f"Successfully deleted image from database: ID {image_id}")
