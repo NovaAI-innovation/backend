@@ -378,10 +378,32 @@ async def reorder_gallery_images(
                 }
             )
 
-        # Update display_order for each image
-        # Use enumerate to get position in array (0, 1, 2, ...)
-        # Lower display_order = appears first in gallery
-        for position, image_id in enumerate(image_ids):
+        # Get ALL images to handle reordering properly
+        # If only a subset is provided, we need to adjust all images
+        all_images_result = await db.execute(
+            select(GalleryImage).order_by(GalleryImage.display_order.asc())
+        )
+        all_images = all_images_result.scalars().all()
+        all_image_ids = {img.id for img in all_images}
+        
+        # Create a set of IDs that are being reordered
+        reordered_ids = set(image_ids)
+        
+        # Build the final ordered list:
+        # 1. Reordered images in the order provided
+        # 2. Remaining images in their current relative order
+        final_ordered_ids = []
+        final_ordered_ids.extend(image_ids)  # Add reordered images first
+        
+        # Add remaining images that weren't in the reorder request
+        # Maintain their current relative order
+        for img in all_images:
+            if img.id not in reordered_ids:
+                final_ordered_ids.append(img.id)
+
+        # Update display_order for ALL images to ensure no conflicts
+        # This prevents gaps or overlapping display_order values
+        for position, image_id in enumerate(final_ordered_ids):
             await db.execute(
                 update(GalleryImage)
                 .where(GalleryImage.id == image_id)
