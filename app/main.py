@@ -147,7 +147,88 @@ async def log_requests(request: Request, call_next):
         )
         raise
 
-# Include routers
+# OPTIONS handlers must be registered BEFORE routers to ensure they're matched first
+@app.options("/api/gallery-images")
+async def options_gallery_images(request: Request):
+    """
+    Explicit OPTIONS handler for gallery-images endpoint.
+    Handles null origin (file:// protocol) for development.
+    """
+    origin = request.headers.get("origin", "No origin")
+    logger.info(
+        f"Explicit OPTIONS handler called for /api/gallery-images\n"
+        f"  Origin: {origin}\n"
+        f"  All headers: {dict(request.headers)}"
+    )
+    
+    # Handle null origin (file:// protocol)
+    # When origin is null, we can't use credentials (CORS spec)
+    allow_origin = origin if origin != "No origin" else "*"
+    if origin == "null":
+        allow_origin = "null"
+    
+    # Return empty response with CORS headers
+    return JSONResponse(
+        content={},
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
+
+
+@app.options("/api/cms/{path:path}")
+async def options_cms_routes(request: Request, path: str):
+    """
+    Explicit OPTIONS handler for all CMS routes.
+    Handles CORS preflight requests for all allowed origins.
+    This catches all OPTIONS requests to /api/cms/* routes.
+    """
+    origin = request.headers.get("origin", "No origin")
+    access_control_request_method = request.headers.get("access-control-request-method", "POST")
+    access_control_request_headers = request.headers.get("access-control-request-headers", "*")
+    
+    logger.info(
+        f"Explicit OPTIONS handler called for /api/cms/{path}\n"
+        f"  Origin: {origin}\n"
+        f"  Access-Control-Request-Method: {access_control_request_method}\n"
+        f"  Access-Control-Request-Headers: {access_control_request_headers}\n"
+        f"  All headers: {dict(request.headers)}"
+    )
+    
+    # Determine allowed origin
+    if origin == "No origin":
+        # No origin header - allow with wildcard (for same-origin requests)
+        allow_origin = "*"
+    elif origin == "null":
+        # Null origin (file:// protocol)
+        allow_origin = "null"
+    elif origin in cors_origins:
+        # Origin is in allowed list
+        allow_origin = origin
+    else:
+        # Origin not in allowed list - still allow but log warning
+        logger.warning(f"OPTIONS request from unlisted origin: {origin}")
+        allow_origin = origin  # Allow it anyway for now
+    
+    # Return empty response with CORS headers
+    return JSONResponse(
+        content={},
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": access_control_request_headers or "*",
+            "Access-Control-Expose-Headers": "*",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
+
+
+# Include routers (after OPTIONS handlers)
 app.include_router(gallery.router, prefix="/api", tags=["gallery"])
 app.include_router(cms.router, prefix="/api", tags=["CMS"])
 
