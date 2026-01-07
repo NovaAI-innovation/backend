@@ -4,7 +4,7 @@ Defines data structures for API endpoints with automatic validation and serializ
 """
 from pydantic import BaseModel, ConfigDict, field_validator
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 
 class GalleryImageResponse(BaseModel):
@@ -25,6 +25,38 @@ class GalleryImageResponse(BaseModel):
             datetime: lambda v: v.isoformat()  # Format dates as ISO 8601 strings
         }
     )
+
+
+class GalleryImagePublicResponse(BaseModel):
+    """
+    Optimized response schema for public gallery API.
+    Excludes timestamps not needed by frontend to reduce payload size.
+    """
+    id: int
+    cloudinary_url: str
+    caption: Optional[str] = None
+    display_order: int
+
+    model_config = ConfigDict(
+        from_attributes=True
+    )
+
+
+class PaginationMetadata(BaseModel):
+    """
+    Pagination metadata for cursor-based pagination.
+    """
+    next_cursor: Optional[int] = None
+    has_more: bool
+    total_count: int
+
+
+class GalleryImagesPageResponse(BaseModel):
+    """
+    Paginated response for gallery images.
+    """
+    images: List[GalleryImagePublicResponse]
+    pagination: PaginationMetadata
 
 
 class GalleryImageCreate(BaseModel):
