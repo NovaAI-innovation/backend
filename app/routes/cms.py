@@ -183,11 +183,11 @@ async def add_cms_gallery_images(
                 detail={"error": "No files provided", "detail": "At least one image file is required"}
             )
         
-        # Get captions if provided (one per file)
+        # Get captions if provided
         caption_list = []
         captions = form.getlist("captions")
         if captions:
-            caption_list = [c.strip() if isinstance(c, str) and c.strip() else None for c in captions]
+            caption_list = [c if isinstance(c, str) else str(c) for c in captions]
         
         # Validate all files first
         for i, file in enumerate(files):
@@ -198,69 +198,39 @@ async def add_cms_gallery_images(
                     detail={"error": "Invalid file type", "detail": f"File '{filename}' is not a valid image file"}
                 )
         
-        # Step 1: Process Cloudinary uploads concurrently (no DB session needed)
-        # This avoids session conflicts while maintaining performance
+        # Process uploads concurrently for better performance
         upload_tasks = []
         for i, file in enumerate(files):
-            # Get caption for this file (one caption per file, by index)
+            # Get caption for this file (if provided)
             caption = None
             if caption_list and i < len(caption_list):
-                caption = caption_list[i] if caption_list[i] else None
+                caption = caption_list[i]
+            elif caption_list and len(caption_list) == 1:
+                # If only one caption provided, apply to all files
+                caption = caption_list[0]
             
-            # Create upload task (only Cloudinary upload, no DB operations)
-            task = _upload_to_cloudinary_and_convert(file, caption)
+            # Create upload task
+            task = _process_single_image_upload(file, caption, db)
             upload_tasks.append(task)
         
-        # Execute all Cloudinary uploads concurrently
-        upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        # Execute all uploads concurrently
+        results = await asyncio.gather(*upload_tasks, return_exceptions=True)
         
-        # Step 2: Process database operations sequentially (using main session)
-        # This avoids session concurrency issues
+        # Process results and handle errors
         created_images = []
         errors = []
         
-        for i, upload_result in enumerate(upload_results):
-            filename = getattr(files[i], 'filename', f'file_{i}')
-            
-            if isinstance(upload_result, Exception):
-                error_msg = str(upload_result)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                error_msg = str(result)
+                filename = getattr(files[i], 'filename', f'file_{i}')
                 logger.error(f"Error uploading file {filename}: {error_msg}")
                 errors.append({
                     "filename": filename,
                     "error": error_msg
                 })
             else:
-                # Upload succeeded, now save to database
-                try:
-                    cloudinary_url = upload_result["cloudinary_url"]
-                    caption = upload_result["caption"]
-                    
-                    # Get the current maximum display_order
-                    max_order_result = await db.execute(
-                        select(func.max(GalleryImage.display_order))
-                    )
-                    max_order = max_order_result.scalar() or 0
-                    
-                    # Save to database with next display_order
-                    new_image = GalleryImage(
-                        cloudinary_url=cloudinary_url,
-                        caption=caption.strip() if caption and caption.strip() else None,
-                        display_order=max_order + 1
-                    )
-                    db.add(new_image)
-                    await db.flush()  # Flush to get ID but don't commit yet
-                    await db.refresh(new_image)
-                    
-                    created_images.append(new_image)
-                    logger.info(f"Successfully saved image to database: ID {new_image.id}, display_order={new_image.display_order}")
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    logger.error(f"Error saving file {filename} to database: {error_msg}")
-                    errors.append({
-                        "filename": filename,
-                        "error": f"Database error: {error_msg}"
-                    })
+                created_images.append(result)
         
         # If all uploads failed, rollback and return error
         if len(created_images) == 0:
@@ -299,24 +269,25 @@ async def add_cms_gallery_images(
         )
 
 
-async def _upload_to_cloudinary_and_convert(
+async def _process_single_image_upload(
     file: UploadFile,
-    caption: Optional[str]
-) -> dict:
+    caption: Optional[str],
+    db: AsyncSession
+) -> GalleryImage:
     """
-    Upload a single image to Cloudinary and convert to WebP if beneficial.
-    This function does NOT interact with the database to avoid session conflicts.
+    Process a single image upload.
     Helper function for bulk uploads.
     
     Args:
         file: Image file to upload
         caption: Optional caption for the image
+        db: Database session
     
     Returns:
-        dict: Contains "cloudinary_url" and "caption" keys
+        GalleryImage: Created image model
     
     Raises:
-        Exception: If upload or conversion fails
+        Exception: If upload or save fails
     """
     try:
         # Read file content
@@ -355,11 +326,27 @@ async def _upload_to_cloudinary_and_convert(
         cloudinary_url = cloudinary_result["url"]
         
         logger.info(f"Successfully uploaded to Cloudinary: {cloudinary_url}")
+
+        # Get the current maximum display_order
+        max_order_result = await db.execute(
+            select(func.max(GalleryImage.display_order))
+        )
+        max_order = max_order_result.scalar() or 0
+
+        # Save to database with next display_order
+        # New images appear at the end (highest order number)
+        new_image = GalleryImage(
+            cloudinary_url=cloudinary_url,
+            caption=caption.strip() if caption and caption.strip() else None,
+            display_order=max_order + 1
+        )
+        db.add(new_image)
+        await db.flush()  # Flush to get ID but don't commit yet
+        await db.refresh(new_image)
+
+        logger.info(f"Successfully saved image to database: ID {new_image.id}, display_order={new_image.display_order}")
         
-        return {
-            "cloudinary_url": cloudinary_url,
-            "caption": caption
-        }
+        return new_image
         
     except Exception as e:
         logger.error(f"Error processing image upload for {file.filename}: {str(e)}")
@@ -569,45 +556,30 @@ async def delete_cms_gallery_images_bulk(
                 detail={"error": "No images found", "detail": f"None of the provided image IDs were found"}
             )
         
-        # Step 1: Process Cloudinary deletions concurrently (no DB session needed)
-        # This avoids session conflicts while maintaining performance
+        # Process deletions concurrently
         delete_tasks = []
         for image in images:
-            # Create deletion task (only Cloudinary deletion, no DB operations)
-            task = _delete_from_cloudinary(image)
+            task = _process_single_image_deletion(image, db)
             delete_tasks.append(task)
         
-        # Execute all Cloudinary deletions concurrently
-        delete_results = await asyncio.gather(*delete_tasks, return_exceptions=True)
+        # Execute all deletions concurrently
+        results = await asyncio.gather(*delete_tasks, return_exceptions=True)
         
-        # Step 2: Process database operations sequentially (using main session)
-        # This avoids session concurrency issues
+        # Process results
         deleted_ids = []
         errors = []
         
-        for i, delete_result in enumerate(delete_results):
+        for i, result in enumerate(results):
             image = images[i]
-            
-            if isinstance(delete_result, Exception):
-                error_msg = str(delete_result)
-                logger.error(f"Error deleting from Cloudinary for image {image.id}: {error_msg}")
-                # Continue with database deletion even if Cloudinary deletion fails
-                # But log the error for debugging
-            
-            # Delete from database (always attempt, even if Cloudinary deletion failed)
-            try:
-                await db.execute(
-                    delete(GalleryImage).where(GalleryImage.id == image.id)
-                )
-                deleted_ids.append(image.id)
-                logger.info(f"Successfully deleted image from database: ID {image.id}")
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"Error deleting image {image.id} from database: {error_msg}")
+            if isinstance(result, Exception):
+                error_msg = str(result)
+                logger.error(f"Error deleting image {image.id}: {error_msg}")
                 errors.append({
                     "image_id": image.id,
-                    "error": f"Database error: {error_msg}"
+                    "error": error_msg
                 })
+            else:
+                deleted_ids.append(image.id)
         
         # If all deletions failed, rollback and return error
         if len(deleted_ids) == 0:
@@ -646,19 +618,20 @@ async def delete_cms_gallery_images_bulk(
         )
 
 
-async def _delete_from_cloudinary(
-    image: GalleryImage
+async def _process_single_image_deletion(
+    image: GalleryImage,
+    db: AsyncSession
 ) -> None:
     """
-    Delete a single image from Cloudinary.
-    This function does NOT interact with the database to avoid session conflicts.
+    Process deletion of a single image.
     Helper function for bulk deletions.
     
     Args:
-        image: GalleryImage model to delete from Cloudinary
+        image: GalleryImage model to delete
+        db: Database session
     
     Raises:
-        Exception: If Cloudinary deletion fails
+        Exception: If deletion fails
     """
     try:
         # Extract Cloudinary public_id from URL
@@ -668,17 +641,23 @@ async def _delete_from_cloudinary(
             logger.info(f"Extracted public_id: {cloudinary_public_id} from URL: {image.cloudinary_url}")
         except ValueError as e:
             logger.warning(f"Failed to extract public_id from URL: {str(e)}")
-            raise ValueError(f"Could not extract public_id from URL: {image.cloudinary_url}")
         
-        # Delete from Cloudinary
+        # Delete from Cloudinary (if public_id was extracted)
         if cloudinary_public_id:
-            result = await delete_image(cloudinary_public_id)
-            logger.info(f"Successfully deleted from Cloudinary: {cloudinary_public_id}, result: {result}")
-        else:
-            raise ValueError(f"No public_id extracted for image ID {image.id}")
+            try:
+                result = await delete_image(cloudinary_public_id)
+                logger.info(f"Successfully deleted from Cloudinary: {cloudinary_public_id}, result: {result}")
+            except Exception as e:
+                logger.error(f"Failed to delete from Cloudinary for image ID {image.id} (public_id: {cloudinary_public_id}): {str(e)}", exc_info=True)
+                # Continue with database deletion even if Cloudinary deletion fails
+                # But log the error for debugging
+        
+        # Delete from database
+        await db.delete(image)
+        logger.info(f"Successfully deleted image from database: ID {image.id}")
         
     except Exception as e:
-        logger.error(f"Error deleting from Cloudinary for image ID {image.id}: {str(e)}", exc_info=True)
+        logger.error(f"Error processing image deletion for ID {image.id}: {str(e)}")
         raise
 
 

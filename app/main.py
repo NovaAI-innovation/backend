@@ -49,6 +49,52 @@ app.add_middleware(
     max_age=3600,  # Cache preflight requests for 1 hour
 )
 
+# Custom CORS middleware to ensure headers are set for all allowed origins
+@app.middleware("http")
+async def cors_ensure_headers_middleware(request: Request, call_next):
+    """
+    Custom middleware to ensure CORS headers are set for all allowed origins.
+    This acts as a fallback if CORSMiddleware doesn't set headers properly.
+    """
+    origin = request.headers.get("origin")
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Check if origin is in allowed list or is null
+    if origin:
+        is_allowed_origin = (
+            origin in cors_origins or 
+            origin == "null" or
+            any(origin.startswith(allowed.replace("*", "")) for allowed in cors_origins if "*" in allowed)
+        )
+        
+        if is_allowed_origin:
+            # Check if Access-Control-Allow-Origin is already set (case-insensitive)
+            has_cors_header = any(
+                key.lower() == "access-control-allow-origin" 
+                for key in response.headers.keys()
+            )
+            
+            if not has_cors_header:
+                # Set CORS headers
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+                response.headers["Access-Control-Allow-Headers"] = "*"
+                response.headers["Access-Control-Expose-Headers"] = "*"
+                logger.info(f"Added CORS headers for origin '{origin}' to {request.method} {request.url.path}")
+            else:
+                # Ensure the header value matches the origin
+                for key, value in list(response.headers.items()):
+                    if key.lower() == "access-control-allow-origin":
+                        if value != origin and origin != "null":
+                            response.headers[key] = origin
+                            logger.info(f"Updated CORS header to '{origin}' for {request.method} {request.url.path}")
+                        break
+    
+    return response
+
+
 # Request logging middleware for debugging
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -181,6 +227,54 @@ async def options_gallery_images(request: Request):
             "Access-Control-Allow-Origin": allow_origin,
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
             "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
+
+
+@app.options("/api/cms/{path:path}")
+async def options_cms_routes(request: Request, path: str):
+    """
+    Explicit OPTIONS handler for all CMS routes.
+    Handles CORS preflight requests for all allowed origins.
+    This catches all OPTIONS requests to /api/cms/* routes.
+    """
+    origin = request.headers.get("origin", "No origin")
+    access_control_request_method = request.headers.get("access-control-request-method", "POST")
+    access_control_request_headers = request.headers.get("access-control-request-headers", "*")
+    
+    logger.info(
+        f"Explicit OPTIONS handler called for /api/cms/{path}\n"
+        f"  Origin: {origin}\n"
+        f"  Access-Control-Request-Method: {access_control_request_method}\n"
+        f"  Access-Control-Request-Headers: {access_control_request_headers}\n"
+        f"  All headers: {dict(request.headers)}"
+    )
+    
+    # Determine allowed origin
+    if origin == "No origin":
+        # No origin header - allow with wildcard (for same-origin requests)
+        allow_origin = "*"
+    elif origin == "null":
+        # Null origin (file:// protocol)
+        allow_origin = "null"
+    elif origin in cors_origins:
+        # Origin is in allowed list
+        allow_origin = origin
+    else:
+        # Origin not in allowed list - still allow but log warning
+        logger.warning(f"OPTIONS request from unlisted origin: {origin}")
+        allow_origin = origin  # Allow it anyway for now
+    
+    # Return empty response with CORS headers
+    return JSONResponse(
+        content={},
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": access_control_request_headers or "*",
+            "Access-Control-Expose-Headers": "*",
             "Access-Control-Max-Age": "3600",
         }
     )
