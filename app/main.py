@@ -2,7 +2,7 @@
 FastAPI application entry point.
 Main application instance with middleware and route configuration.
 """
-from fastapi import FastAPI, Request, status, Depends
+from fastapi import FastAPI, Request, status, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -151,7 +151,62 @@ async def log_requests(request: Request, call_next):
 app.include_router(gallery.router, prefix="/api", tags=["gallery"])
 app.include_router(cms.router, prefix="/api", tags=["CMS"])
 
+
+def add_cors_headers(response: JSONResponse, request: Request) -> JSONResponse:
+    """
+    Add CORS headers to a response based on the request origin.
+    
+    Args:
+        response: The JSONResponse to add headers to
+        request: The incoming request to check origin from
+    
+    Returns:
+        JSONResponse with CORS headers added
+    """
+    origin = request.headers.get("origin")
+    
+    if origin:
+        # Check if origin is allowed
+        is_allowed = (
+            origin in cors_origins or 
+            origin == "null" or
+            any(origin.startswith(allowed.replace("*", "")) for allowed in cors_origins if "*" in allowed)
+        )
+        
+        if is_allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+    
+    return response
+
+
 # Exception Handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions (401, 403, 404, etc.) with CORS headers."""
+    logger.error(
+        f"HTTPException on {request.method} {request.url.path}:\n"
+        f"  Status: {exc.status_code}\n"
+        f"  Origin: {request.headers.get('origin', 'No origin')}\n"
+        f"  Detail: {exc.detail}"
+    )
+    
+    # Handle both string and dict detail formats
+    if isinstance(exc.detail, dict):
+        content = exc.detail
+    else:
+        content = {"error": exc.detail, "detail": str(exc.detail)}
+    
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content=content
+    )
+    
+    return add_cors_headers(response, request)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
@@ -163,13 +218,14 @@ async def validation_exception_handler(
         f"  Headers: {dict(request.headers)}\n"
         f"  Errors: {exc.errors()}"
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={
             "error": "Validation error",
             "detail": exc.errors()
         }
     )
+    return add_cors_headers(response, request)
 
 
 @app.exception_handler(Exception)
@@ -182,13 +238,14 @@ async def general_exception_handler(request: Request, exc: Exception):
         f"  Error type: {type(exc).__name__}",
         exc_info=True
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "Internal server error",
             "detail": "An unexpected error occurred"
         }
     )
+    return add_cors_headers(response, request)
 
 
 # Root Endpoints
