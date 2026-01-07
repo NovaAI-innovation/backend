@@ -29,6 +29,7 @@ class Settings(BaseSettings):
         "http://localhost",
         "http://127.0.0.1",
         "https://novaai-innovation.github.io",
+        "*",  # Allow all origins - use specific URLs in production
     ]
     
     # Database Configuration (will be used in Story 2.2)
